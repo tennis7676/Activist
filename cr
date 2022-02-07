@@ -2,16 +2,6 @@ import pandas as pd
 Index = pd.read_csv('C:/Users/kosuke/ファクター分析/Data/MarketIndex_new.csv')
 Index
 
-#価格データ取得
-import ccxt
-import requests
-import json
-import time
-from datetime import datetime
-import pandas as pd
-import numpy as np
-
-
 for s in symbol_list: 
     url="https://fapi.binance.com/fapi/v1/klines?symbol=" + s + "USDT" + "&interval="+ "1d" +"&limit="+str(1500)
     df2 = pd.DataFrame(requests.get(url).json())
