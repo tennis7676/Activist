@@ -3,16 +3,13 @@ Index = pd.read_csv('C:/Users/kosuke/ファクター分析/Data/MarketIndex_new.
 Index
 
 for s in symbol_list: 
-    url="https://fapi.binance.com/fapi/v1/klines?symbol=" + s + "USDT" + "&interval="+ "1d" +"&limit="+str(1500)
+    ####
     df2 = pd.DataFrame(requests.get(url).json())
     df2 = df2.rename(columns={0:"Time", 4:"Close"})
     df2["Symbol"] = s
     df2 = df2[["Symbol", "Time", "Close"]]
         
-    if s == "1000SHIB":   #最初の場合
-        df = df2
-    else:
-        df = pd.concat([df, df2], axis=0, join="inner")
+    ###
 
 df = df.sort_values(["Time","Symbol"]).reset_index(drop=True)
 df = df[df["Time"] != df["Time"][len(df)-1]]    #一番最後の日付はまだ確定していない
