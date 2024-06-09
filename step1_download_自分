@@ -1,0 +1,2135 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 有価証券報告書をダウンロードし、パースした後にエクセルに追加する"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "- EDINETのAPI1を通じて有価証券報告書のdocIDをlistで取得する\n",
+    "- EDINETのAPI2を通じてdocIDの有価証券報告書をzip形式で取得する\n",
+    "- zipを解凍してXBRLの形式のファイルを取得する\n",
+    "- ファイルは決算期ごとにまとめる\n",
+    "- 同時に月ごとのエクセルにも追加する"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "C:\\Users\\kosuke\\AppData\\Roaming\\Python\\Python37\\site-packages\\pandas\\compat\\_optional.py:138: UserWarning: Pandas requires version '2.7.0' or newer of 'numexpr' (version '2.6.9' currently installed).\n",
+      "  warnings.warn(msg, UserWarning)\n"
+     ]
+    }
+   ],
+   "source": [
+    "import requests\n",
+    "import os\n",
+    "import time\n",
+    "from datetime import date, timedelta\n",
+    "from dateutil.relativedelta import relativedelta\n",
+    "from zipfile import ZipFile\n",
+    "import pandas as pd\n",
+    "from requests.packages.urllib3.exceptions import InsecureRequestWarning\n",
+    "requests.packages.urllib3.disable_warnings(InsecureRequestWarning)\n",
+    "import glob\n",
+    "import numpy as np\n",
+    "from tqdm import tqdm\n",
+    "\n",
+    "from arelle import ModelManager\n",
+    "from arelle import Cntlr\n",
+    "from arelle.ModelValue import qname"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 6,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "[datetime.date(2024, 2, 1),\n",
+       " datetime.date(2024, 2, 2),\n",
+       " datetime.date(2024, 2, 3),\n",
+       " datetime.date(2024, 2, 4),\n",
+       " datetime.date(2024, 2, 5),\n",
+       " datetime.date(2024, 2, 6),\n",
+       " datetime.date(2024, 2, 7),\n",
+       " datetime.date(2024, 2, 8),\n",
+       " datetime.date(2024, 2, 9),\n",
+       " datetime.date(2024, 2, 10),\n",
+       " datetime.date(2024, 2, 11),\n",
+       " datetime.date(2024, 2, 12),\n",
+       " datetime.date(2024, 2, 13),\n",
+       " datetime.date(2024, 2, 14),\n",
+       " datetime.date(2024, 2, 15),\n",
+       " datetime.date(2024, 2, 16),\n",
+       " datetime.date(2024, 2, 17),\n",
+       " datetime.date(2024, 2, 18),\n",
+       " datetime.date(2024, 2, 19),\n",
+       " datetime.date(2024, 2, 20),\n",
+       " datetime.date(2024, 2, 21),\n",
+       " datetime.date(2024, 2, 22),\n",
+       " datetime.date(2024, 2, 23),\n",
+       " datetime.date(2024, 2, 24),\n",
+       " datetime.date(2024, 2, 25),\n",
+       " datetime.date(2024, 2, 26),\n",
+       " datetime.date(2024, 2, 27),\n",
+       " datetime.date(2024, 2, 28),\n",
+       " datetime.date(2024, 2, 29)]"
+      ]
+     },
+     "execution_count": 6,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "StartDate = date(2024, 2, 1)\n",
+    "EndDate = date(2024, 3, 1)\n",
+    "\n",
+    "DateList = []\n",
+    "CurrentDate = StartDate\n",
+    "while CurrentDate < EndDate:\n",
+    "    DateList.append(CurrentDate)\n",
+    "    CurrentDate += timedelta(days=1)\n",
+    "DateList"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 16,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#APIキー\n",
+    "api_key = 'f53f8a46117a42cabfd2c3300dd44661'\n",
+    "proxies = {'http':  'http://ski-tc-prox1v11.newsnet.jp.daiwacm.com:8080',\n",
+    "           'https': 'http://ski-tc-prox1v11.newsnet.jp.daiwacm.com:8080'}\n",
+    "\n",
+    "#書類一覧のAPI\n",
+    "url1 = 'https://disclosure.edinet-fsa.go.jp/api/v2/documents.json' #date=2022-04-15type=2\n",
+    "#書類取得のためのAPI\n",
+    "url2 = 'https://disclosure.edinet-fsa.go.jp/api/v2/documents/' #S1234567?type=1\n",
+    "#ファイルの保存先\n",
+    "XBRL_dir = 'C:/Users/kosuke/stock/ffw/XBRL/'\n",
+    "#path_main_xbrl = ''   #\"S:\\B910\\商品一課\\TOPIXFFW予想\\有価証券報告書XBRL\"\n",
+    "path_main_excel = ''  #\"S:\\B910\\商品一課\\TOPIXFFW予想\\有価証券報告書抽出後データ\""
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 8,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#データ区分のフラグ\n",
+    "#大株主：１\n",
+    "ookabunusi = '1'\n",
+    "#自己株式：２\n",
+    "jikokabu = '2'\n",
+    "#役員：３\n",
+    "yakuin = '3'\n",
+    "#政策保有株：４\n",
+    "seisaku = '4'\n",
+    "#発行済み株式数\n",
+    "hakkouzumi = '5'"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### API1\n",
+    "- 有価証券書報告書であるdocIDをlistとして取得する"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 9,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "100%|██████████████████████████████████████████████████████████████████████████████████| 29/29 [00:06<00:00,  4.98it/s]\n"
+     ]
+    },
+    {
+     "data": {
+      "text/plain": [
+       "[['S100SWMF', '61360', '202311'],\n",
+       " ['S100SVA5', '79650', '202311'],\n",
+       " ['S100SX1Q', '27340', '202311'],\n",
+       " ['S100SX17', '98720', '202311'],\n",
+       " ['S100SXN6', '32670', '202311'],\n",
+       " ['S100SXSD', '97200', '202311'],\n",
+       " ['S100SXB2', '32010', '202311'],\n",
+       " ['S100SXVU', '28300', '202311'],\n",
+       " ['S100SXZJ', '49920', '202311'],\n",
+       " ['S100SXY6', '31860', '202311'],\n",
+       " ['S100SXGS', '43610', '202311'],\n",
+       " ['S100SXXC', '66640', '202311'],\n",
+       " ['S100SY5L', '46160', '202311'],\n",
+       " ['S100SY4C', '93690', '202311'],\n",
+       " ['S100SXUQ', '29750', '202311'],\n",
+       " ['S100SY5X', '39070', '202311'],\n",
+       " ['S100SY1F', '52430', '202311'],\n",
+       " ['S100SYAM', '73600', '202311'],\n",
+       " ['S100SY65', '70740', '202311'],\n",
+       " ['S100SXGY', '60760', '202311'],\n",
+       " ['S100SYKT', '40160', '202311'],\n",
+       " ['S100SY25', '78790', '202311'],\n",
+       " ['S100SY28', '64740', '202311'],\n",
+       " ['S100SYLH', '55270', '202311'],\n",
+       " ['S100SYO3', '65580', '202311'],\n",
+       " ['S100SXYN', '59420', '202311'],\n",
+       " ['S100SYOE', '35470', '202311'],\n",
+       " ['S100SY96', '33770', '202311'],\n",
+       " ['S100SYOA', '95580', '202311'],\n",
+       " ['S100SY79', '72270', '202311'],\n",
+       " ['S100SYCM', '49950', '202311'],\n",
+       " ['S100SYRV', '31390', '202311'],\n",
+       " ['S100SYT6', '24930', '202311'],\n",
+       " ['S100SYM7', '62170', '202311'],\n",
+       " ['S100SYTN', '79970', '202311'],\n",
+       " ['S100SYVT', '41970', '202311'],\n",
+       " ['S100SYK1', '99720', '202311'],\n",
+       " ['S100SYHH', '93130', '202311'],\n",
+       " ['S100SYTB', '32440', '202311'],\n",
+       " ['S100SYOB', '75010', '202311'],\n",
+       " ['S100SYEO', '39940', '202311'],\n",
+       " ['S100SYR6', '97170', '202311'],\n",
+       " ['S100SYXE', '73880', '202311'],\n",
+       " ['S100SYHG', '89230', '202311'],\n",
+       " ['S100SKO2', '96470', '202311'],\n",
+       " ['S100SYZH', '32660', '202311'],\n",
+       " ['S100SZ0L', '92500', '202311'],\n",
+       " ['S100SZ1T', '30890', '202311'],\n",
+       " ['S100SZ1K', '46730', '202311'],\n",
+       " ['S100SYKE', '66340', '202311'],\n",
+       " ['S100SYTP', '53410', '202311'],\n",
+       " ['S100SYSN', '52460', '202311'],\n",
+       " ['S100SYIG', '34540', '202311'],\n",
+       " ['S100SZ1N', '80950', '202311'],\n",
+       " ['S100SZ0P', '70830', '202311'],\n",
+       " ['S100SS7Q', '41870', '202311'],\n",
+       " ['S100SYRH', '24710', '202311'],\n",
+       " ['S100SZ6G', '64920', '202311'],\n",
+       " ['S100SYBO', '28090', '202311'],\n",
+       " ['S100SZ7X', '68660', '202312'],\n",
+       " ['S100SZ2R', '98370', '202311'],\n",
+       " ['S100SZ8N', '43940', '202311'],\n",
+       " ['S100SZAF', '52500', '202311'],\n",
+       " ['S100SZ69', '40550', '202311'],\n",
+       " ['S100SZBP', '138A0', '202311'],\n",
+       " ['S100SXZG', '42500', '202311'],\n",
+       " ['S100SZDA', '92150', '202311']]"
+      ]
+     },
+     "execution_count": 9,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "#docIDを取得\n",
+    "#[docID, 銘柄コード, 決算期]\n",
+    "docIDList = []\n",
+    "for d_date in tqdm(DateList):\n",
+    "    params1 = {\"date\":d_date, \"type\": 2, \"Subscription-Key\":api_key}\n",
+    "    #print(date)\n",
+    "    \n",
+    "    while True:\n",
+    "        try:\n",
+    "            #r1 = requests.get(url1, params=params1, proxies=proxies).json()['results']\n",
+    "            r1 = requests.get(url1, params=params1).json()['results']\n",
+    "        except:\n",
+    "            time.sleep(0.5)\n",
+    "            print(r1)\n",
+    "        else:\n",
+    "            break\n",
+    "            \n",
+    "    for x in r1:\n",
+    "        #ほとんどの会社が第三号様式で出している\n",
+    "        #有価証券報告書 & 企業内容等の開示に関する内閣府令 & 第三号様式 & XBRLファイルが存在する & 取り下げられた書類ではない　& 銘柄コードが存在する\n",
+    "        if x['docTypeCode'] == '120' and x['ordinanceCode'] == '010' and x['formCode'] == '030000' and x['xbrlFlag'] == '1' and x['withdrawalStatus'] == '0' and x['secCode'] is not None:\n",
+    "            PeriodEnd = str(x['periodEnd'][0:4] + x['periodEnd'][5:7]) \n",
+    "            docIDList.append([x['docID'], x['secCode'], PeriodEnd])\n",
+    "            \n",
+    "docIDList"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 10,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "67"
+      ]
+     },
+     "execution_count": 10,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "len(docIDList)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# API2"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 42,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def FetchXBRL(doc):\n",
+    "    print(doc[0], doc[1])\n",
+    "    path_zip =  'tmp.zip'\n",
+    "    docID = doc[0]\n",
+    "    secCode = doc[1]\n",
+    "    _PeriodEnd = doc[2]\n",
+    "    #解凍後の保存先 決算月ごとに保存するなければ作成する\n",
+    "    if not os.path.exists(f'{XBRL_dir}{_PeriodEnd}'):\n",
+    "        os.makedirs(f'{XBRL_dir}{_PeriodEnd}')\n",
+    "    \n",
+    "    _path = f'{XBRL_dir}{_PeriodEnd}/{secCode}'\n",
+    "    \n",
+    "    #API2でXBRLファイルを取得\n",
+    "    #requestでエラーが起きるので成功するまで続ける\n",
+    "    while True:\n",
+    "        time.sleep(0.5)\n",
+    "        try:\n",
+    "            #r2 = requests.get(url2 + docID, params={\"type\": 1, \"Subscription-Key\":api_key}, stream=True, proxies = proxies)\n",
+    "            r2 = requests.get(url2 + docID, params={\"type\": 1, \"Subscription-Key\":api_key})\n",
+    "            #正常にAPIから取得できた場合\n",
+    "            if r2.status_code == 200:\n",
+    "                #一時的にzipfileを保存\n",
+    "                try:\n",
+    "                    with open(path_zip, 'wb') as file:\n",
+    "                        file.write(r2.content)\n",
+    "                    #XBRLに解凍\n",
+    "                    with ZipFile(path_zip) as z:\n",
+    "                        z.extractall(_path)\n",
+    "                except:\n",
+    "                    list_error.append(doc)\n",
+    "                    break\n",
+    "            #リクエストが間違っているorAPIキーが間違っているor取り下げられている場合は取得をやめる\n",
+    "            elif r2.status_code in [400, 401, 404]:\n",
+    "                break\n",
+    "        #エラーが起きた場合の処理\n",
+    "        except:\n",
+    "            #もう一度挑戦\n",
+    "            continue\n",
+    "        #成功した場合の処理\n",
+    "        else:\n",
+    "            list_success.append(doc)\n",
+    "            break\n",
+    "    return _path"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 41,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def InsertCSV(df, _code, _period):\n",
+    "    CSVPath = f'C:/Users/kosuke/stock/ffw/yuho/{_period}.csv'\n",
+    "    encoding = 'cp932'\n",
+    "    if os.path.isfile(CSVPath):\n",
+    "        ogn = pd.read_csv(CSVPath, dtype={'period':int,'fdate':int,'code':str,'flg':'int16','renban':int}, encoding=encoding)\n",
+    "        #エクセルが存在していてすでに該当月のCODEが存在している場合はinsertしない\n",
+    "        if not _code in ogn['code'].values:\n",
+    "            new = pd.concat([ogn, df]).sort_values(by=['period', 'fdate', 'code', 'flg', 'renban']).reset_index(drop=True)\n",
+    "            new.to_csv(CSVPath, index=False, encoding=encoding)\n",
+    "    else:\n",
+    "        df.to_csv(CSVPath, index=False, encoding=encoding)\n",
+    "        \n",
+    "\n",
+    "def ParseXBRL(path_xbrl_code):\n",
+    "    path_xbrl = glob.glob(path_xbrl_code + r\"\\XBRL\\PublicDoc\\*.xbrl\")[0]\n",
+    "    \n",
+    "    code, name, period, FilingDate, IssuedShares = None, None, None, None, None\n",
+    "        \n",
+    "    #辞書を束ねる辞書\n",
+    "    dic = {'MajorShNames':{}, 'MajorShShares':{}, 'MajorSh':{},    #最終的にMajorShに集約する\n",
+    "           'MajorShVotingRightsNames':{}, 'MajorShVotingRightsShares':{},\n",
+    "           'TreasuryNames':{}, 'TreasuryShares':{}, 'treasury':{}, #最終的にtreasuryに集約する\n",
+    "           'DirectorNames':{}, 'DirectorShares':{}, 'director':{}, #最終的にdirectorに集約する\n",
+    "           'SINames':{}, 'SIShares':{}, 'SIPrior1Shares':{},        #HDではない会社。最終的にSIListに集約する\n",
+    "           'SILargestNames':{}, 'SILargestShares':{}, 'SILargestPrior1Shares':{},    #HDでLagest。最終的にSILargestListに集約する\n",
+    "           'SISecondNames':{}, 'SISecondShares':{}, 'SISecondPrior1Shares':{}        #HDでSecond。最終的にSISecondListに集約する\n",
+    "          }\n",
+    "    \n",
+    "    #データフレームを束ねる辞書\n",
+    "    DfDic = {}\n",
+    "    \n",
+    "    #発行済株式から自己保有株式を取る\n",
+    "    TreasuryShares = 0\n",
+    "    #発行済株式から相互保有株式を取る\n",
+    "    TreasurySharesReciprocal = 0\n",
+    "    \n",
+    "    #政策保有株\n",
+    "    NameOfLargestCompany, NameOfSecondCompany = None, None\n",
+    "    \n",
+    "    ctrl = Cntlr.Cntlr()\n",
+    "    model_manager = ModelManager.initialize(ctrl)\n",
+    "    model_xbrl = model_manager.load(path_xbrl)\n",
+    "    list_temp = []\n",
+    "\n",
+    "    for fact in model_xbrl.facts:\n",
+    "        #銘柄コード\n",
+    "        if str(fact.qname) == 'jpdei_cor:SecurityCodeDEI':\n",
+    "            code = str(fact.value)\n",
+    "        #銘柄名\n",
+    "        if str(fact.qname) == 'jpdei_cor:FilerNameInJapaneseDEI':\n",
+    "            name = str(fact.value)\n",
+    "        #決算期←yyyymm00をyyyymmに変えた\n",
+    "        if str(fact.qname) == 'jpdei_cor:CurrentPeriodEndDateDEI':\n",
+    "            period = int(fact.value[0:4] + fact.value[5:7])\n",
+    "        #提出日\n",
+    "        if str(fact.qname) == 'jpcrp_cor:FilingDateCoverPage':\n",
+    "            FilingDate = int(fact.value.replace('-', ''))\n",
+    "        #発行済み株式数\n",
+    "        if str(fact.qname) in ['jpcrp_cor:NumberOfIssuedSharesAsOfFiscalYearEndIssuedSharesTotalNumberOfSharesEtc', 'jpcrp_cor:NumberOfIssuedSharesIssuedSharesTotalNumberOfSharesEtc'] and 'OrdinaryShareMember' in str(fact.contextID):    \n",
+    "            IssuedShares = float(fact.value)\n",
+    "        #大株主1位~10位まで\n",
+    "        if str(fact.qname) == 'jpcrp_cor:NameMajorShareholders' and  'MajorShareholdersMember' in str(fact.contextID):\n",
+    "            dic['MajorShNames'][fact.contextID] = fact.value\n",
+    "        if str(fact.qname) == 'jpcrp_cor:NumberOfSharesHeld'  and  'MajorShareholdersMember' in str(fact.contextID):\n",
+    "            dic['MajorShShares'][fact.contextID] = float(fact.value)\n",
+    "        #大株主1位~10位までの議決権\n",
+    "        if str(fact.qname) == 'jpcrp_cor:NameMajorShareholdersVotingRights'  and  'MajorShareholdersVotingRightsMember' in str(fact.contextID):\n",
+    "            dic['MajorShVotingRightsNames'][fact.contextID] = fact.value\n",
+    "        if str(fact.qname) == 'jpcrp_cor:NumberOfVotingRightsHeld'  and  'MajorShareholdersVotingRightsMember' in str(fact.contextID):\n",
+    "            #議決権を株数単位にする\n",
+    "            dic['MajorShVotingRightsShares'][fact.contextID] = float(fact.value + '00')\n",
+    "\n",
+    "        #自己株式　発行済み株式の完全議決権株式から取得。自己名義の株式が存在する場合はそちらを取る。他人名義は大株主と重複している可能性がある。計の部分が同じティッカーで入っている場合があるので削除  \n",
+    "        #有報には自己株式等の欄があるのにXBRLではない場合がある。自己株式等がない場合は念のため発行済み株式から自己保有株式をとる\n",
+    "        #自己株式等の自己名義株式\n",
+    "        if str(fact.qname) == 'jpcrp_cor:NameOfShareholderTreasurySharesEtc' and 'CurrentYearInstant' in str(fact.contextID) and '計' != fact.value:\n",
+    "            dic['TreasuryNames'][fact.contextID] = fact.value\n",
+    "        if str(fact.qname) == 'jpcrp_cor:NumberOfSharesHeldInOwnNameTreasurySharesEtc'and 'CurrentYearInstant' in str(fact.contextID):\n",
+    "            dic['TreasuryShares'][fact.contextID] = int(fact.value or '0')\n",
+    "        #発行済株式の自己株式\n",
+    "        if str(fact.qname) == 'jpcrp_cor:NumberOfSharesIssuedSharesVotingRights' and 'OrdinarySharesTreasurySharesSharesWithFullVotingRightsTreasurySharesEtcMember' in str(fact.contextID):\n",
+    "            TreasuryShares = int(fact.value or '0')\n",
+    "        #発行済株式の相互保有株式\n",
+    "        if str(fact.qname) == 'jpcrp_cor:NumberOfSharesIssuedSharesVotingRights' and 'OrdinarySharesReciprocalHoldingSharesWithFullVotingRightsTreasurySharesEtcMember' in str(fact.contextID):\n",
+    "            TreasurySharesReciprocal = int(fact.value or '0')\n",
+    "        \n",
+    "        #役員\n",
+    "        if 'jpcrp_cor:NameInformationAboutDirectorsAndCorporateAuditors' in str(fact.qname):\n",
+    "            dic['DirectorNames'][fact.contextID] = fact.value\n",
+    "        if 'jpcrp_cor:NumberOfSharesHeldOrdinarySharesInformationAboutDirectorsAndCorporateAuditors' in str(fact.qname):\n",
+    "            dic['DirectorShares'][fact.contextID] = int(fact.value or '0')\n",
+    "            \n",
+    "        #政策保有株 今年度と前年度も。３パターンあるので名前で取ってくる。マージするときにqnameでマージしたいが名前と保有株数で異なるので削除する\n",
+    "        #普通の会社\n",
+    "        if str(fact.qname) == 'jpcrp_cor:NameOfSecuritiesDetailsOfSpecifiedInvestmentEquitySecuritiesHeldForPurposesOtherThanPureInvestmentReportingCompany':\n",
+    "            dic['SINames'][fact.contextID] = fact.value\n",
+    "        if str(fact.qname) == 'jpcrp_cor:NumberOfSharesHeldDetailsOfSpecifiedInvestmentEquitySecuritiesHeldForPurposesOtherThanPureInvestmentReportingCompany' and 'CurrentYear' in str(fact.contextID):\n",
+    "            dic['SIShares'][fact.contextID] = int(fact.value or '0')\n",
+    "        if str(fact.qname) == 'jpcrp_cor:NumberOfSharesHeldDetailsOfSpecifiedInvestmentEquitySecuritiesHeldForPurposesOtherThanPureInvestmentReportingCompany' and 'Prior1Year' in str(fact.contextID):\n",
+    "            dic['SIPrior1Shares'][fact.contextID.replace('Prior1', 'Current')] = int(fact.value or '0')\n",
+    "        \n",
+    "        #HDのLargest\n",
+    "        if str(fact.qname) == 'jpcrp_cor:NameOfGroupCompanyHoldingLargestAmountOfInvestmentSharesInGroup':\n",
+    "            NameOfLargestCompany = fact.value\n",
+    "        if str(fact.qname) == 'jpcrp_cor:NameOfSecuritiesDetailsOfSpecifiedInvestmentEquitySecuritiesHeldForPurposesOtherThanPureInvestmentLargestHoldingCompany':\n",
+    "            dic['SILargestNames'][fact.contextID] = fact.value\n",
+    "        if str(fact.qname) == 'jpcrp_cor:NumberOfSharesHeldDetailsOfSpecifiedInvestmentEquitySecuritiesHeldForPurposesOtherThanPureInvestmentLargestHoldingCompany' and 'CurrentYear' in str(fact.contextID):\n",
+    "            dic['SILargestShares'][fact.contextID] = int(fact.value or '0')\n",
+    "        if str(fact.qname) == 'jpcrp_cor:NumberOfSharesHeldDetailsOfSpecifiedInvestmentEquitySecuritiesHeldForPurposesOtherThanPureInvestmentLargestHoldingCompany' and 'Prior1Year' in str(fact.contextID):\n",
+    "            dic['SILargestPrior1Shares'][fact.contextID.replace('Prior1', 'Current')] = int(fact.value or '0')\n",
+    "            \n",
+    "        #HDのSecond\n",
+    "        if str(fact.qname) == 'jpcrp_cor:NameOfGroupCompanyHoldingSecondLargestAmountOfInvestmentSharesInGroup':\n",
+    "            NameOfSecondCompany = fact.value\n",
+    "        if str(fact.qname) == 'jpcrp_cor:NameOfSecuritiesDetailsOfSpecifiedInvestmentEquitySecuritiesHeldForPurposesOtherThanPureInvestmentSecondLargestHoldingCompany':\n",
+    "            dic['SISecondNames'][fact.contextID] = fact.value\n",
+    "        if str(fact.qname) == 'jpcrp_cor:NumberOfSharesHeldDetailsOfSpecifiedInvestmentEquitySecuritiesHeldForPurposesOtherThanPureInvestmentSecondLargestHoldingCompany' and 'CurrentYear' in str(fact.contextID):\n",
+    "            dic['SISecondShares'][fact.contextID] = int(fact.value or '0')\n",
+    "        if str(fact.qname) == 'jpcrp_cor:NumberOfSharesHeldDetailsOfSpecifiedInvestmentEquitySecuritiesHeldForPurposesOtherThanPureInvestmentSecondLargestHoldingCompany' and 'Prior1Year' in str(fact.contextID):\n",
+    "            dic['SISecondPrior1Shares'][fact.contextID.replace('Prior1', 'Current')] = int(fact.value or '0')\n",
+    "    \n",
+    "    \n",
+    "    #ここからはデータフレームにまとめる    \n",
+    "    #大株主　優先株が発行されている企業は別に議決権ベースでの大株主10位を開示している。存在していればこちらを優先\n",
+    "    if dic['MajorShVotingRightsNames']:\n",
+    "        dic['MajorSh'] = {dic['MajorShVotingRightsNames'][key]: dic['MajorShVotingRightsShares'][key] for key in dic['MajorShVotingRightsNames']}\n",
+    "    else:\n",
+    "        dic['MajorSh'] = {dic['MajorShNames'][key]: dic['MajorShShares'][key] for key in dic['MajorShNames']}\n",
+    "    \n",
+    "    DfDic['MajorSh'] = pd.DataFrame(dic['MajorSh'].items(), columns=['HolderName', 'shares'])\n",
+    "    DfDic['MajorSh']['flg'] = 1  #大株主\n",
+    "    \n",
+    "    #自己株式\n",
+    "    if dic['TreasuryNames']:\n",
+    "        #dic['TreasuryShares'][key] が存在しない場合は、float( or 0)にする？？\n",
+    "        dic['treasury'] = {dic['TreasuryNames'][key] : dic['TreasuryShares'][key] for key in dic['TreasuryNames']}\n",
+    "        DfDic['treasury'] = pd.DataFrame(dic['treasury'].items(), columns=['HolderName', 'shares'])\n",
+    "        DfDic['treasury']['flg'] = 2  #自己株式\n",
+    "        #自己株式等の欄はあるが全部NULLの場合0株として処理する\n",
+    "        if DfDic['treasury'].loc[0, 'HolderName'] == '':\n",
+    "            DfDic['treasury'] = pd.DataFrame([['自己株式', TreasuryShares + TreasurySharesReciprocal, 2]], columns=['HolderName', 'shares', 'flg'])\n",
+    "    \n",
+    "    #自己株式の欄が無い場合は発行済み株式数から。それでもない場合は0\n",
+    "    else:\n",
+    "        DfDic['treasury'] = pd.DataFrame([['自己株式', TreasuryShares + TreasurySharesReciprocal, 2]], columns=['HolderName', 'shares', 'flg'])\n",
+    "    \n",
+    "    #役員\n",
+    "    dic['director'] = {dic['DirectorNames'][key] : dic['DirectorShares'][key] for key in dic['DirectorNames']}\n",
+    "    DfDic['director'] = pd.DataFrame(dic['director'].items(), columns=['HolderName', 'shares'])\n",
+    "    DfDic['director']['flg'] = 3  #役員\n",
+    "    \n",
+    "    #政策保有株←HolderNameは自社の名前な気がするが、これ間違っていないか？？\n",
+    "    if dic['SINames']:\n",
+    "        #ここはリストにして３つ並べたほうがいいかも\n",
+    "        SIList = [[s[1], dic['SIShares'].get(s[0], 0), dic['SIPrior1Shares'].get(s[0], 0), 4] for s in list(dic['SINames'].items())]\n",
+    "        DfDic['SI'] = pd.DataFrame(SIList, columns=['HolderName', 'shares', 'p1shares', 'flg'])\n",
+    "\n",
+    "    if dic['SILargestNames']:\n",
+    "        SILargestList = [[s[1], NameOfLargestCompany, dic['SILargestShares'].get(s[0], 0), dic['SILargestPrior1Shares'].get(s[0], 0), 4] for s in list(dic['SILargestNames'].items())]\n",
+    "        DfDic['SILargest'] = pd.DataFrame(SILargestList, columns=['HolderName', 'SubHolderName', 'shares', 'p1shares', 'flg'])\n",
+    "\n",
+    "    if dic['SISecondNames']:\n",
+    "        SISecondList = [[s[1], NameOfSecondCompany, dic['SISecondShares'].get(s[0], 0), dic['SISecondPrior1Shares'].get(s[0], 0), 4] for s in list(dic['SISecondNames'].items())]\n",
+    "        DfDic['SISecond'] = pd.DataFrame(SISecondList, columns=['HolderName', 'SubHolderName', 'shares', 'p1shares', 'flg'])\n",
+    "    \n",
+    "    #発行済み株式数\n",
+    "    DfDic['issued'] = pd.DataFrame([['5', '発行済株式数', IssuedShares]], columns=['flg', 'HolderName', 'shares'])\n",
+    "    \n",
+    "    result = pd.concat(DfDic.values())\n",
+    "    result['fdate'] = FilingDate\n",
+    "    result['code'] = code\n",
+    "    result['name'] = name\n",
+    "    result['period'] = period\n",
+    "    #SHARESが0NULLの場合があるので0を振る\n",
+    "    #df_result['SHARES'] = df_result['SHARES'].fillna(0)\n",
+    "    #df_result['SHARES'] = df_result['SHARES'].replace('', 0)\n",
+    "    #DB登録時に重複しないために連番を振る\n",
+    "    result = result.astype({'flg':'int16'}).sort_values(by='flg').reset_index(drop=True)\n",
+    "    result['renban'] = result.groupby('flg').cumcount()\n",
+    "    #空白削除\n",
+    "    result['name'] = result['name'].replace('\\s', '', regex=True)\n",
+    "    result['HolderName'] = result['HolderName'].replace('\\s', '', regex=True)\n",
+    "    if not('SubHolderName' in result.columns):\n",
+    "        result['SubHolderName'] = None\n",
+    "    if not('p1shares' in result.columns):\n",
+    "        result['p1shares'] = None\n",
+    "    result = result.astype({'shares':float, 'p1shares':float, 'renban':float})\n",
+    "    result = result[['period', 'fdate', 'code', 'name', 'flg', 'renban', 'HolderName', 'SubHolderName', 'shares', 'p1shares']]\n",
+    "    #DB登録\n",
+    "    InsertCSV(result, code, period)\n",
+    "    return result"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 43,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      "  0%|                                                                                           | 0/67 [00:00<?, ?it/s]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SWMF 61360\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      "  1%|█▏                                                                                 | 1/67 [00:10<11:02, 10.03s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SVA5 79650\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      "  3%|██▍                                                                                | 2/67 [00:19<10:35,  9.78s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SX1Q 27340\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      "  4%|███▋                                                                               | 3/67 [00:26<09:43,  9.12s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SX17 98720\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      "  6%|████▉                                                                              | 4/67 [00:34<09:06,  8.67s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SXN6 32670\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      "  7%|██████▏                                                                            | 5/67 [00:43<09:06,  8.82s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SXSD 97200\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      "  9%|███████▍                                                                           | 6/67 [00:51<08:33,  8.42s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SXB2 32010\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 10%|████████▋                                                                          | 7/67 [01:00<08:45,  8.76s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SXVU 28300\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 12%|█████████▉                                                                         | 8/67 [01:08<08:17,  8.43s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SXZJ 49920\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 13%|███████████▏                                                                       | 9/67 [01:15<07:51,  8.13s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SXY6 31860\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 15%|████████████▏                                                                     | 10/67 [01:23<07:35,  8.00s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SXGS 43610\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 16%|█████████████▍                                                                    | 11/67 [01:44<11:09, 11.96s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SXXC 66640\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 18%|██████████████▋                                                                   | 12/67 [01:52<09:52, 10.76s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SY5L 46160\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 19%|███████████████▉                                                                  | 13/67 [02:06<10:29, 11.66s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SY4C 93690\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 21%|█████████████████▏                                                                | 14/67 [02:14<09:28, 10.72s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SXUQ 29750\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 22%|██████████████████▎                                                               | 15/67 [02:23<08:39,  9.99s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SY5X 39070\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 24%|███████████████████▌                                                              | 16/67 [02:30<07:53,  9.28s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SY1F 52430\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 25%|████████████████████▊                                                             | 17/67 [02:44<08:46, 10.52s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SYAM 73600\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 27%|██████████████████████                                                            | 18/67 [02:56<09:01, 11.04s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SY65 70740\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 28%|███████████████████████▎                                                          | 19/67 [03:11<09:50, 12.30s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SXGY 60760\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 30%|████████████████████████▍                                                         | 20/67 [03:20<08:49, 11.26s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SYKT 40160\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 31%|█████████████████████████▋                                                        | 21/67 [03:28<07:46, 10.15s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SY25 78790\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 33%|██████████████████████████▉                                                       | 22/67 [03:35<07:05,  9.45s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SY28 64740\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 34%|████████████████████████████▏                                                     | 23/67 [03:45<06:56,  9.46s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SYLH 55270\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 36%|█████████████████████████████▎                                                    | 24/67 [03:54<06:43,  9.39s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SYO3 65580\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 37%|██████████████████████████████▌                                                   | 25/67 [04:03<06:21,  9.09s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SXYN 59420\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 39%|███████████████████████████████▊                                                  | 26/67 [04:12<06:18,  9.24s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SYOE 35470\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 40%|█████████████████████████████████                                                 | 27/67 [04:19<05:47,  8.68s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SY96 33770\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 42%|██████████████████████████████████▎                                               | 28/67 [04:28<05:31,  8.51s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SYOA 95580\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 43%|███████████████████████████████████▍                                              | 29/67 [04:36<05:17,  8.37s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SY79 72270\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 45%|████████████████████████████████████▋                                             | 30/67 [04:44<05:15,  8.52s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SYCM 49950\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 46%|█████████████████████████████████████▉                                            | 31/67 [04:52<04:56,  8.23s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SYRV 31390\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 48%|███████████████████████████████████████▏                                          | 32/67 [05:02<05:03,  8.66s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SYT6 24930\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 49%|████████████████████████████████████████▍                                         | 33/67 [05:10<04:52,  8.62s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SYM7 62170\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 51%|█████████████████████████████████████████▌                                        | 34/67 [05:19<04:50,  8.79s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SYTN 79970\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 52%|██████████████████████████████████████████▊                                       | 35/67 [05:29<04:46,  8.94s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SYVT 41970\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 54%|████████████████████████████████████████████                                      | 36/67 [05:37<04:31,  8.75s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SYK1 99720\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 55%|█████████████████████████████████████████████▎                                    | 37/67 [05:46<04:28,  8.95s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SYHH 93130\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 57%|██████████████████████████████████████████████▌                                   | 38/67 [05:55<04:16,  8.84s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SYTB 32440\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 58%|███████████████████████████████████████████████▋                                  | 39/67 [06:09<04:47, 10.27s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SYOB 75010\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 60%|████████████████████████████████████████████████▉                                 | 40/67 [06:24<05:19, 11.84s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SYEO 39940\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 61%|██████████████████████████████████████████████████▏                               | 41/67 [06:52<07:15, 16.76s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SYR6 97170\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 63%|███████████████████████████████████████████████████▍                              | 42/67 [07:45<11:27, 27.51s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SYXE 73880\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 64%|████████████████████████████████████████████████████▋                             | 43/67 [07:55<08:56, 22.36s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SYHG 89230\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 66%|█████████████████████████████████████████████████████▊                            | 44/67 [08:10<07:43, 20.14s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SKO2 96470\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 67%|███████████████████████████████████████████████████████                           | 45/67 [08:22<06:29, 17.70s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SYZH 32660\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 69%|████████████████████████████████████████████████████████▎                         | 46/67 [08:33<05:30, 15.73s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SZ0L 92500\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 70%|█████████████████████████████████████████████████████████▌                        | 47/67 [08:44<04:43, 14.16s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SZ1T 30890\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 72%|██████████████████████████████████████████████████████████▋                       | 48/67 [08:54<04:07, 13.01s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SZ1K 46730\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 73%|███████████████████████████████████████████████████████████▉                      | 49/67 [09:03<03:31, 11.76s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SYKE 66340\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 75%|█████████████████████████████████████████████████████████████▏                    | 50/67 [09:15<03:18, 11.67s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SYTP 53410\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 76%|██████████████████████████████████████████████████████████████▍                   | 51/67 [09:24<02:56, 11.03s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SYSN 52460\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 78%|███████████████████████████████████████████████████████████████▋                  | 52/67 [09:35<02:45, 11.00s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SYIG 34540\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 79%|████████████████████████████████████████████████████████████████▊                 | 53/67 [09:45<02:29, 10.70s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SZ1N 80950\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 81%|██████████████████████████████████████████████████████████████████                | 54/67 [09:56<02:21, 10.90s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SZ0P 70830\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 82%|███████████████████████████████████████████████████████████████████▎              | 55/67 [10:18<02:48, 14.02s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SS7Q 41870\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 84%|████████████████████████████████████████████████████████████████████▌             | 56/67 [10:29<02:24, 13.11s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SYRH 24710\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 85%|█████████████████████████████████████████████████████████████████████▊            | 57/67 [10:41<02:08, 12.85s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SZ6G 64920\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 87%|██████████████████████████████████████████████████████████████████████▉           | 58/67 [10:50<01:45, 11.78s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SYBO 28090\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 88%|████████████████████████████████████████████████████████████████████████▏         | 59/67 [11:01<01:31, 11.41s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SZ7X 68660\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 90%|█████████████████████████████████████████████████████████████████████████▍        | 60/67 [11:10<01:15, 10.72s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SZ2R 98370\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 91%|██████████████████████████████████████████████████████████████████████████▋       | 61/67 [11:21<01:04, 10.81s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SZ8N 43940\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 93%|███████████████████████████████████████████████████████████████████████████▉      | 62/67 [11:30<00:51, 10.39s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SZAF 52500\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 94%|█████████████████████████████████████████████████████████████████████████████     | 63/67 [11:39<00:39,  9.83s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SZ69 40550\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 96%|██████████████████████████████████████████████████████████████████████████████▎   | 64/67 [11:48<00:28,  9.67s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SZBP 138A0\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 97%|███████████████████████████████████████████████████████████████████████████████▌  | 65/67 [11:56<00:18,  9.22s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SXZG 42500\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      " 99%|████████████████████████████████████████████████████████████████████████████████▊ | 66/67 [12:06<00:09,  9.33s/it]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "S100SZDA 92150\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "\n",
+      "\n",
+      "100%|██████████████████████████████████████████████████████████████████████████████████| 67/67 [12:14<00:00,  8.96s/it]"
+     ]
+    },
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>period</th>\n",
+       "      <th>fdate</th>\n",
+       "      <th>code</th>\n",
+       "      <th>name</th>\n",
+       "      <th>flg</th>\n",
+       "      <th>renban</th>\n",
+       "      <th>HolderName</th>\n",
+       "      <th>SubHolderName</th>\n",
+       "      <th>shares</th>\n",
+       "      <th>p1shares</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>0</th>\n",
+       "      <td>202311</td>\n",
+       "      <td>20240216</td>\n",
+       "      <td>61360</td>\n",
+       "      <td>オーエスジー株式会社</td>\n",
+       "      <td>1</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>日本マスタートラスト信託銀行株式会社（信託口）</td>\n",
+       "      <td>None</td>\n",
+       "      <td>12954000.0</td>\n",
+       "      <td>NaN</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1</th>\n",
+       "      <td>202311</td>\n",
+       "      <td>20240216</td>\n",
+       "      <td>61360</td>\n",
+       "      <td>オーエスジー株式会社</td>\n",
+       "      <td>1</td>\n",
+       "      <td>1.0</td>\n",
+       "      <td>株式会社日本カストディ銀行（信託口）</td>\n",
+       "      <td>None</td>\n",
+       "      <td>6609000.0</td>\n",
+       "      <td>NaN</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>2</th>\n",
+       "      <td>202311</td>\n",
+       "      <td>20240216</td>\n",
+       "      <td>61360</td>\n",
+       "      <td>オーエスジー株式会社</td>\n",
+       "      <td>1</td>\n",
+       "      <td>2.0</td>\n",
+       "      <td>SSBTCCLIENTOMNIBUSACCOUNT（常任代理人香港上海銀行東京支店カストディ...</td>\n",
+       "      <td>None</td>\n",
+       "      <td>5235000.0</td>\n",
+       "      <td>NaN</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>3</th>\n",
+       "      <td>202311</td>\n",
+       "      <td>20240216</td>\n",
+       "      <td>61360</td>\n",
+       "      <td>オーエスジー株式会社</td>\n",
+       "      <td>1</td>\n",
+       "      <td>3.0</td>\n",
+       "      <td>オーエスジーエージェント会</td>\n",
+       "      <td>None</td>\n",
+       "      <td>3504000.0</td>\n",
+       "      <td>NaN</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>4</th>\n",
+       "      <td>202311</td>\n",
+       "      <td>20240216</td>\n",
+       "      <td>61360</td>\n",
+       "      <td>オーエスジー株式会社</td>\n",
+       "      <td>1</td>\n",
+       "      <td>4.0</td>\n",
+       "      <td>オーエスジー持株会</td>\n",
+       "      <td>None</td>\n",
+       "      <td>2621000.0</td>\n",
+       "      <td>NaN</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>...</th>\n",
+       "      <td>...</td>\n",
+       "      <td>...</td>\n",
+       "      <td>...</td>\n",
+       "      <td>...</td>\n",
+       "      <td>...</td>\n",
+       "      <td>...</td>\n",
+       "      <td>...</td>\n",
+       "      <td>...</td>\n",
+       "      <td>...</td>\n",
+       "      <td>...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1911</th>\n",
+       "      <td>202312</td>\n",
+       "      <td>20240229</td>\n",
+       "      <td>68660</td>\n",
+       "      <td>日置電機株式会社</td>\n",
+       "      <td>4</td>\n",
+       "      <td>7.0</td>\n",
+       "      <td>日精樹脂工業㈱</td>\n",
+       "      <td>None</td>\n",
+       "      <td>78400.0</td>\n",
+       "      <td>78400.0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1912</th>\n",
+       "      <td>202312</td>\n",
+       "      <td>20240229</td>\n",
+       "      <td>68660</td>\n",
+       "      <td>日置電機株式会社</td>\n",
+       "      <td>4</td>\n",
+       "      <td>8.0</td>\n",
+       "      <td>明治電機工業㈱</td>\n",
+       "      <td>None</td>\n",
+       "      <td>100000.0</td>\n",
+       "      <td>100000.0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1913</th>\n",
+       "      <td>202312</td>\n",
+       "      <td>20240229</td>\n",
+       "      <td>68660</td>\n",
+       "      <td>日置電機株式会社</td>\n",
+       "      <td>4</td>\n",
+       "      <td>9.0</td>\n",
+       "      <td>日本電計㈱</td>\n",
+       "      <td>None</td>\n",
+       "      <td>130905.0</td>\n",
+       "      <td>128254.0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1914</th>\n",
+       "      <td>202312</td>\n",
+       "      <td>20240229</td>\n",
+       "      <td>68660</td>\n",
+       "      <td>日置電機株式会社</td>\n",
+       "      <td>4</td>\n",
+       "      <td>10.0</td>\n",
+       "      <td>新光商事㈱</td>\n",
+       "      <td>None</td>\n",
+       "      <td>50000.0</td>\n",
+       "      <td>50000.0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1915</th>\n",
+       "      <td>202312</td>\n",
+       "      <td>20240229</td>\n",
+       "      <td>68660</td>\n",
+       "      <td>日置電機株式会社</td>\n",
+       "      <td>5</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>発行済株式数</td>\n",
+       "      <td>None</td>\n",
+       "      <td>14024365.0</td>\n",
+       "      <td>NaN</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "<p>1916 rows × 10 columns</p>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "      period     fdate   code        name  flg  renban  \\\n",
+       "0     202311  20240216  61360  オーエスジー株式会社    1     0.0   \n",
+       "1     202311  20240216  61360  オーエスジー株式会社    1     1.0   \n",
+       "2     202311  20240216  61360  オーエスジー株式会社    1     2.0   \n",
+       "3     202311  20240216  61360  オーエスジー株式会社    1     3.0   \n",
+       "4     202311  20240216  61360  オーエスジー株式会社    1     4.0   \n",
+       "...      ...       ...    ...         ...  ...     ...   \n",
+       "1911  202312  20240229  68660    日置電機株式会社    4     7.0   \n",
+       "1912  202312  20240229  68660    日置電機株式会社    4     8.0   \n",
+       "1913  202312  20240229  68660    日置電機株式会社    4     9.0   \n",
+       "1914  202312  20240229  68660    日置電機株式会社    4    10.0   \n",
+       "1915  202312  20240229  68660    日置電機株式会社    5     0.0   \n",
+       "\n",
+       "                                             HolderName SubHolderName  \\\n",
+       "0                               日本マスタートラスト信託銀行株式会社（信託口）          None   \n",
+       "1                                    株式会社日本カストディ銀行（信託口）          None   \n",
+       "2     SSBTCCLIENTOMNIBUSACCOUNT（常任代理人香港上海銀行東京支店カストディ...          None   \n",
+       "3                                         オーエスジーエージェント会          None   \n",
+       "4                                             オーエスジー持株会          None   \n",
+       "...                                                 ...           ...   \n",
+       "1911                                            日精樹脂工業㈱          None   \n",
+       "1912                                            明治電機工業㈱          None   \n",
+       "1913                                              日本電計㈱          None   \n",
+       "1914                                              新光商事㈱          None   \n",
+       "1915                                             発行済株式数          None   \n",
+       "\n",
+       "          shares  p1shares  \n",
+       "0     12954000.0       NaN  \n",
+       "1      6609000.0       NaN  \n",
+       "2      5235000.0       NaN  \n",
+       "3      3504000.0       NaN  \n",
+       "4      2621000.0       NaN  \n",
+       "...          ...       ...  \n",
+       "1911     78400.0   78400.0  \n",
+       "1912    100000.0  100000.0  \n",
+       "1913    130905.0  128254.0  \n",
+       "1914     50000.0   50000.0  \n",
+       "1915  14024365.0       NaN  \n",
+       "\n",
+       "[1916 rows x 10 columns]"
+      ]
+     },
+     "execution_count": 43,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "list_error = []\n",
+    "list_success = []\n",
+    "\n",
+    "res = pd.DataFrame()\n",
+    "\n",
+    "for docID in tqdm(docIDList):\n",
+    "    path_xbrl = FetchXBRL(docID)\n",
+    "    ParsedResult = ParseXBRL(path_xbrl)\n",
+    "    res = pd.concat([res, ParsedResult])\n",
+    "    \n",
+    "res = res.sort_values(by=['period', 'fdate', 'code', 'flg', 'renban']).reset_index(drop=True)\n",
+    "res"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 23,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "[['S100SWMF', '61360', '202311'],\n",
+       " ['S100SVA5', '79650', '202311'],\n",
+       " ['S100SX1Q', '27340', '202311'],\n",
+       " ['S100SX17', '98720', '202311'],\n",
+       " ['S100SXN6', '32670', '202311'],\n",
+       " ['S100SXSD', '97200', '202311'],\n",
+       " ['S100SXB2', '32010', '202311'],\n",
+       " ['S100SXVU', '28300', '202311'],\n",
+       " ['S100SXZJ', '49920', '202311'],\n",
+       " ['S100SXY6', '31860', '202311'],\n",
+       " ['S100SXGS', '43610', '202311'],\n",
+       " ['S100SXXC', '66640', '202311'],\n",
+       " ['S100SY5L', '46160', '202311'],\n",
+       " ['S100SY4C', '93690', '202311'],\n",
+       " ['S100SXUQ', '29750', '202311'],\n",
+       " ['S100SY5X', '39070', '202311'],\n",
+       " ['S100SY1F', '52430', '202311'],\n",
+       " ['S100SYAM', '73600', '202311'],\n",
+       " ['S100SY65', '70740', '202311'],\n",
+       " ['S100SXGY', '60760', '202311'],\n",
+       " ['S100SYKT', '40160', '202311'],\n",
+       " ['S100SY25', '78790', '202311'],\n",
+       " ['S100SY28', '64740', '202311'],\n",
+       " ['S100SYLH', '55270', '202311'],\n",
+       " ['S100SYO3', '65580', '202311'],\n",
+       " ['S100SXYN', '59420', '202311'],\n",
+       " ['S100SYOE', '35470', '202311'],\n",
+       " ['S100SY96', '33770', '202311'],\n",
+       " ['S100SYOA', '95580', '202311'],\n",
+       " ['S100SY79', '72270', '202311'],\n",
+       " ['S100SYCM', '49950', '202311'],\n",
+       " ['S100SYRV', '31390', '202311'],\n",
+       " ['S100SYT6', '24930', '202311'],\n",
+       " ['S100SYM7', '62170', '202311'],\n",
+       " ['S100SYTN', '79970', '202311'],\n",
+       " ['S100SYVT', '41970', '202311'],\n",
+       " ['S100SYK1', '99720', '202311'],\n",
+       " ['S100SYHH', '93130', '202311'],\n",
+       " ['S100SYTB', '32440', '202311'],\n",
+       " ['S100SYOB', '75010', '202311'],\n",
+       " ['S100SYEO', '39940', '202311'],\n",
+       " ['S100SYR6', '97170', '202311'],\n",
+       " ['S100SYXE', '73880', '202311'],\n",
+       " ['S100SYHG', '89230', '202311'],\n",
+       " ['S100SKO2', '96470', '202311'],\n",
+       " ['S100SYZH', '32660', '202311'],\n",
+       " ['S100SZ0L', '92500', '202311'],\n",
+       " ['S100SZ1T', '30890', '202311'],\n",
+       " ['S100SZ1K', '46730', '202311'],\n",
+       " ['S100SYKE', '66340', '202311'],\n",
+       " ['S100SYTP', '53410', '202311'],\n",
+       " ['S100SYSN', '52460', '202311'],\n",
+       " ['S100SYIG', '34540', '202311'],\n",
+       " ['S100SZ1N', '80950', '202311'],\n",
+       " ['S100SZ0P', '70830', '202311'],\n",
+       " ['S100SS7Q', '41870', '202311'],\n",
+       " ['S100SYRH', '24710', '202311'],\n",
+       " ['S100SZ6G', '64920', '202311'],\n",
+       " ['S100SYBO', '28090', '202311'],\n",
+       " ['S100SZ7X', '68660', '202312'],\n",
+       " ['S100SZ2R', '98370', '202311'],\n",
+       " ['S100SZ8N', '43940', '202311'],\n",
+       " ['S100SZAF', '52500', '202311'],\n",
+       " ['S100SZ69', '40550', '202311'],\n",
+       " ['S100SZBP', '138A0', '202311'],\n",
+       " ['S100SXZG', '42500', '202311'],\n",
+       " ['S100SZDA', '92150', '202311']]"
+      ]
+     },
+     "execution_count": 23,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "docIDList"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.7.3"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}
