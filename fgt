@@ -1,0 +1,181 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
+
+contract FearGreedTokenV5_Test is ERC20, Ownable, ERC20Burnable {
+    
+    // --- 1. 設定値 (Settings) ---
+    uint256 public fearGreedIndex; // 0 to 100
+    uint256 public debugPriceUSD;  // 【テスト用】現在の市場価格 (18 decimals)
+    
+    address public marketingWallet;
+    address public liquidityReceiver;
+    address public uniswapPair;       // プールのアドレス（擬似設定用）
+
+    // Tax Limits
+    uint256 public constant MAX_TAX = 8; // 最大 8%
+    uint256 public constant MIN_TAX = 1; // 最小 1%
+    
+    // Events
+    event StateChanged(string newState, uint256 currentPrice, uint256 index);
+    event TaxApplied(string direction, uint256 taxRate);
+    event Distribution(uint256 burned, uint256 toLP, uint256 toMarketing);
+
+    constructor() ERC20("Fear Greed Token", "FGT") Ownable(msg.sender) {
+        // Total Supply: 10,000,000 (1000万枚固定)
+        _mint(msg.sender, 10000000 * 10 ** 18);
+        
+        // 初期設定: Index 50, 価格 $0.50 (通常状態)
+        fearGreedIndex = 50;
+        debugPriceUSD = 50 * 10**16; // $0.50
+        
+        marketingWallet = msg.sender;
+        liquidityReceiver = msg.sender;
+    }
+
+    // --- 2. テスト用操作機能 ---
+
+    function setIndex(uint256 _newIndex) external onlyOwner {
+        require(_newIndex <= 100, "Index must be 0-100");
+        fearGreedIndex = _newIndex;
+    }
+
+    // 手動で価格を設定 (例: $0.65 -> 650000000000000000)
+    function setDebugPrice(uint256 _priceUSD) external onlyOwner {
+        debugPriceUSD = _priceUSD;
+    }
+
+    function setPairAddress(address _pair) external onlyOwner {
+        uniswapPair = _pair;
+    }
+
+    // --- 3. メインロジック ---
+
+    function transfer(address to, uint256 value) public override returns (bool) {
+        return _transferWithTax(_msgSender(), to, value);
+    }
+
+    function transferFrom(address from, address to, uint256 value) public override returns (bool) {
+        address spender = _msgSender();
+        _spendAllowance(from, spender, value);
+        return _transferWithTax(from, to, value);
+    }
+
+    function _transferWithTax(address from, address to, uint256 amount) internal returns (bool) {
+        // 送金手数料は無料 (0%)
+        // Buy(Pool->User) または Sell(User->Pool) のみTax発生
+        bool isBuy = (from == uniswapPair);
+        bool isSell = (to == uniswapPair);
+        
+        uint256 taxAmount = 0;
+
+        if (from != owner() && to != owner() && (isBuy || isSell)) {
+            
+            // A. Tax率の計算
+            uint256 taxRate = _calculateTax(isBuy);
+            taxAmount = (amount * taxRate) / 100;
+
+            // B. Taxの分配
+            if (taxAmount > 0) {
+                _distributeTax(from, taxAmount);
+                emit TaxApplied(isBuy ? "Buy" : "Sell", taxRate);
+            }
+        }
+
+        uint256 amountReceived = amount - taxAmount;
+        super._transfer(from, to, amountReceived);
+        return true;
+    }
+
+    // --- Tax計算ロジック (Appendix準拠) ---
+    function _calculateTax(bool isBuy) internal view returns (uint256) {
+        // 価格をIndexと比較可能な整数に変換 (Price * 100)
+        // 例: $0.50 -> 50, $0.65 -> 65
+        uint256 scaledPrice = (debugPriceUSD * 100) / 10**18;
+        uint256 index = fearGreedIndex;
+        
+        // 基本Tax: 1%
+        // 変動分: 差分 / 2
+        
+        if (scaledPrice > index) {
+            // Price > Index (価格が高い)
+            uint256 diff = scaledPrice - index;
+            uint256 variable = diff / 2; 
+            
+            if (isBuy) {
+                // 高い時に買う = 乖離を広げる = ペナルティ
+                return _clampTax(1 + variable);
+            } else {
+                // 高い時に売る = 乖離を縮める = インセンティブ(Min)
+                return MIN_TAX;
+            }
+        } else {
+            // Price < Index (価格が安い)
+            uint256 diff = index - scaledPrice;
+            uint256 variable = diff / 2;
+
+            if (isBuy) {
+                // 安い時に買う = 乖離を縮める = インセンティブ(Min)
+                return MIN_TAX;
+            } else {
+                // 安い時に売る = 乖離を広げる = ペナルティ
+                return _clampTax(1 + variable);
+            }
+        }
+    }
+
+    function _clampTax(uint256 rate) internal pure returns (uint256) {
+        if (rate > MAX_TAX) return MAX_TAX;
+        if (rate < MIN_TAX) return MIN_TAX;
+        return rate;
+    }
+
+    // --- 分配ロジック (Section 4準拠) ---
+    function _distributeTax(address sender, uint256 taxAmount) internal {
+        uint256 scaledPrice = (debugPriceUSD * 100) / 10**18;
+        uint256 index = fearGreedIndex;
+        
+        uint256 burnShare;
+        uint256 lpShare;
+        uint256 mktShare;
+
+        // 状態判定
+        if (scaledPrice > index + 10) {
+            // [上方乖離] Price*100 > Index + 10
+            // Mkt 20, LP 80, Burn 0
+            mktShare = (taxAmount * 20) / 100;
+            lpShare = (taxAmount * 80) / 100;
+            burnShare = 0; 
+        } 
+        else if (scaledPrice < (index > 10 ? index - 10 : 0)) {
+            // [下方乖離] Price*100 < Index - 10
+            // Mkt 10, LP 10, Burn 80
+            mktShare = (taxAmount * 10) / 100;
+            lpShare = (taxAmount * 10) / 100;
+            burnShare = (taxAmount * 80) / 100;
+        } 
+        else {
+            // [通常時] |Gap| <= 10
+            // Mkt 20, LP 60, Burn 20
+            mktShare = (taxAmount * 20) / 100;
+            lpShare = (taxAmount * 60) / 100;
+            burnShare = (taxAmount * 20) / 100;
+        }
+
+        // 実行
+        if (burnShare > 0) {
+            _burn(sender, burnShare);
+        }
+        if (lpShare > 0) {
+            super._transfer(sender, liquidityReceiver, lpShare);
+        }
+        if (mktShare > 0) {
+            super._transfer(sender, marketingWallet, mktShare);
+        }
+        
+        emit Distribution(burnShare, lpShare, mktShare);
+    }
+}
